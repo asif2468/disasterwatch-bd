@@ -196,6 +196,35 @@
       flex-direction: column;
       flex-shrink: 0;
       overflow: hidden;
+      position: relative;
+    }
+
+    .sidebar-inner {
+      flex: 1;
+      min-height: 0;
+      overflow-y: auto;
+      padding-right: 4px;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: thin;
+      scrollbar-color: var(--border2) transparent;
+    }
+
+    .sidebar-inner::-webkit-scrollbar { width: 8px; }
+    .sidebar-inner::-webkit-scrollbar-track { background: transparent; }
+    .sidebar-inner::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 4px; }
+
+    #sidebar-scroll-hint {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      padding: 10px 12px;
+      text-align: center;
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      background: linear-gradient(180deg, rgba(240,246,255,0), rgba(240,246,255,0.95));
+      pointer-events: none;
+      z-index: 5;
     }
 
     .sidebar-section {
@@ -246,6 +275,19 @@
     .f-btn[data-t="FL"].on   { border-color:#29b6f6;       color:#29b6f6;       background:rgba(41,182,246,0.08); }
     .f-btn[data-t="VO"].on   { border-color:var(--orange); color:var(--orange); background:var(--orange-glow); }
     .f-btn[data-t="WF"].on   { border-color:var(--yellow); color:var(--yellow); background:rgba(255,214,0,0.08); }
+
+    #time-slider {
+      width: 100%; margin-top: 8px;
+      accent-color: var(--cyan);
+    }
+    .control-label {
+      display:block; font-size:0.72rem; color:var(--text-muted);
+      margin:8px 0 4px; letter-spacing:0.04em; text-transform:uppercase;
+      font-family:var(--font-head);
+    }
+    .route-hint {
+      font-size:0.72rem; color:var(--text-dim); margin-top:8px; line-height:1.4;
+    }
 
     /* Stats strip */
     .stats-strip {
@@ -480,6 +522,12 @@
       cursor:pointer; font-size:0.78rem; padding:0 2px; transition:color .15s; }
     .pa-del:hover { color:var(--red); }
     .pa-txt { color:var(--text); }
+    .section-title { font-family:var(--font-head); font-size:0.78rem; font-weight:700; text-transform:uppercase; letter-spacing:0.09em; color:var(--text-muted); margin-bottom:10px; }
+    .hz-card { background: var(--surface2); border: 1px solid var(--border); border-radius: 7px; padding: 12px 14px; margin-bottom:10px; cursor:pointer; transition:transform 0.18s, box-shadow 0.18s; }
+    .hz-card:hover { transform:translateY(-1px); box-shadow:0 10px 20px rgba(15,23,42,0.08); }
+    .hz-card .e-row1 { gap: 8px; align-items: center; }
+    .hz-card .e-name { font-size: 0.92rem; }
+    .hz-card .badge { padding: 2px 8px; border-radius: 999px; }
     .no-history { font-family:var(--font-mono); font-size:0.73rem; color:var(--text-dim); text-align:center; padding:12px; }
   </style>
 </head>
@@ -525,18 +573,21 @@
     <div id="event-list">
       <div id="empty-msg">No shelters match your search.</div>
     </div>
+
+    <div class="sidebar-section">
+      <div class="section-title">Hazard Zone News</div>
+      <div id="hazard-news">
+        <div class="no-history">No hazard zones detected yet.</div>
+      </div>
+    </div>
+    </div>
+    <div id="sidebar-scroll-hint">Scroll for more ⬇</div>
   </div>
 
   <!-- Map -->
   <div id="map"></div>
   
   <div id="coords">LAT – | LNG –</div>
-
-    <!-- Loading -->
-  <div id="loading">
-    <div class="spinner"></div>
-    <p id="loading-text">Fetching GDACS live feed…</p>
-  </div>
 
 </div>
 
@@ -725,6 +776,10 @@ L.control.layers({}, overlays, { position:'topleft', collapsed:false }).addTo(ma
 map.on('mousemove', e => {
   document.getElementById('coords').textContent =
     `LAT ${e.latlng.lat.toFixed(4)} | LNG ${e.latlng.lng.toFixed(4)}`;
+});
+
+map.on('click', e => {
+  handleRouteClick(e.latlng);
 });
 
 // Bangladesh boundary highlight
@@ -928,11 +983,7 @@ function loadHazardZones() {
 
 // ── Load GDACS ────────────────────────────────────────────────
 async function loadGDACS() {
-  document.getElementById('loading').style.display = 'flex';
-  document.getElementById('loading-text').textContent = 'Fetching GDACS live feed…';
-  
   try {
-    // Try multiple CORS proxies in sequence
     const proxies = [
       { name: 'corsproxy.io', url: 'https://corsproxy.io/?' },
       { name: 'allorigins.win', url: 'https://api.allorigins.win/raw?url=' }
@@ -945,7 +996,6 @@ async function loadGDACS() {
     for (const proxy of proxies) {
       try {
         console.log(`Trying ${proxy.name}...`);
-        document.getElementById('loading-text').textContent = `Connecting via ${proxy.name}…`;
         
         const res = await fetch(proxy.url + encodeURIComponent(api),
           { signal: AbortSignal.timeout(8000) });
@@ -979,7 +1029,6 @@ async function loadGDACS() {
       url:     f.properties.url?.report || null
     }));
 
-    // Keep raw GDACS features (geometry + properties) for full symbology
     rawGDACS = feats;
 
     document.getElementById('live-label').textContent = 'LIVE';
@@ -987,15 +1036,24 @@ async function loadGDACS() {
 
   } catch (e) {
     console.error('GDACS fetch failed:', e.message);
-    document.getElementById('loading-text').textContent = 'Loading sample data (demo mode)…';
-    
     events = SAMPLE;
+    rawGDACS = SAMPLE.map(s => ({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
+      properties: {
+        eventtype: s.type,
+        alertlevel: s.alert,
+        name: s.name,
+        description: s.info,
+        fromdate: s.date,
+        url: { report: s.url }
+      }
+    }));
     document.getElementById('live-label').textContent = 'DEMO';
     document.querySelector('.live-dot').style.background = 'var(--orange)';
   }
 
   render();
-  document.getElementById('loading').style.display = 'none';
 }
 
 function refreshData() {
@@ -1012,7 +1070,6 @@ function refreshData() {
 
 // ── Focus map on a severity level (clicking Red/Orange/Green stat)
 function focusSeverity(level) {
-  // Prefer raw GDACS features when available (full geometry & symbology)
   if (filter === 'ALL' && rawGDACS && rawGDACS.length) {
     const matches = rawGDACS.filter(f => (f.properties.alertlevel || '').toLowerCase() === level.toLowerCase());
     if (!matches || matches.length === 0) { alert(`No ${level} alerts available right now.`); return; }
@@ -1036,7 +1093,6 @@ function focusSeverity(level) {
     return;
   }
 
-  // Fallback to local events array
   const matches = events.filter(e => e.alert === level);
   if (!matches || matches.length === 0) { alert(`No ${level} alerts available right now.`); return; }
   if (matches.length === 1) {
@@ -1170,7 +1226,6 @@ function renderNearbyShelters(query) {
     
     c.addEventListener('click', (evt) => {
       evt.stopPropagation();
-      // Highlight the card
       document.querySelectorAll('.e-card').forEach(card => card.style.opacity = '0.6');
       c.style.opacity = '1';
       // Fly to shelter on map
@@ -1206,7 +1261,6 @@ function searchEvents() {
 function listenAnnouncements() {
   if (!db) return;
 
-  // Show latest to users (real-time)
   db.ref('/announcements').orderByChild('ts').limitToLast(1)
     .on('value', snap => {
       snap.forEach(c => {
@@ -1215,7 +1269,6 @@ function listenAnnouncements() {
       });
     });
 
-  // Admin history
   db.ref('/announcements').orderByChild('ts')
     .on('value', snap => {
       const arr = [];
