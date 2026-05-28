@@ -570,6 +570,23 @@
         <div class="stat g" onclick="showAllShelters()"><div class="n" id="cnt-shelters">–</div><div class="l">Shelters Nearby</div></div>
       </div>
 
+    <div class="sidebar-section">
+      <div class="section-title">Filters</div>
+      <div class="filter-grid" style="margin-top:6px">
+        <button class="f-btn" data-type="ALL" onclick="applyShelterFilter('ALL')">All</button>
+        <button class="f-btn" data-type="Cyclone Shelter" onclick="applyShelterFilter('Cyclone Shelter')">Cyclone</button>
+        <button class="f-btn" data-type="Community Center" onclick="applyShelterFilter('Community Center')">Community</button>
+        <button class="f-btn" data-type="School" onclick="applyShelterFilter('School')">School</button>
+        <button class="f-btn" data-type="Relief Center" onclick="applyShelterFilter('Relief Center')">Relief</button>
+        <button class="f-btn" data-type="Flood Shelter" onclick="applyShelterFilter('Flood Shelter')">Flood</button>
+      </div>
+      <div style="margin-top:10px">
+        <label class="control-label">Time window (days)</label>
+        <input id="time-slider" type="range" min="1" max="30" value="7" onchange="updateTimeWindow(this.value)" />
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-top:6px">Showing last <span id="time-window-label">7</span> days</div>
+      </div>
+    </div>
+
     <div id="event-list">
       <div id="empty-msg">No shelters match your search.</div>
     </div>
@@ -579,7 +596,6 @@
       <div id="hazard-news">
         <div class="no-history">No hazard zones detected yet.</div>
       </div>
-    </div>
     </div>
     <div id="sidebar-scroll-hint">Scroll for more ⬇</div>
   </div>
@@ -727,6 +743,54 @@ const SHELTERS_GEOJSON = {
   ]
 };
 
+const DISTRICT_RISK_GEOJSON = {
+  type: 'FeatureCollection',
+  features: [
+    { type: 'Feature', properties: { name: 'Dhaka District', risk: 'High' }, geometry: { type: 'Polygon', coordinates: [[[90.1,23.5],[90.1,24.0],[90.7,24.0],[90.7,23.5],[90.1,23.5]]] } },
+    { type: 'Feature', properties: { name: 'Chittagong District', risk: 'Medium' }, geometry: { type: 'Polygon', coordinates: [[[91.7,22.2],[91.7,22.6],[92.1,22.6],[92.1,22.2],[91.7,22.2]]] } },
+    { type: 'Feature', properties: { name: 'Sylhet District', risk: 'High' }, geometry: { type: 'Polygon', coordinates: [[[91.6,24.6],[91.6,25.1],[92.2,25.1],[92.2,24.6],[91.6,24.6]]] } },
+    { type: 'Feature', properties: { name: 'Khulna District', risk: 'Medium' }, geometry: { type: 'Polygon', coordinates: [[[89.0,22.4],[89.0,23.0],[89.6,23.0],[89.6,22.4],[89.0,22.4]]] } },
+    { type: 'Feature', properties: { name: 'Rajshahi District', risk: 'Low' }, geometry: { type: 'Polygon', coordinates: [[[88.3,24.1],[88.3,24.7],[89.0,24.7],[89.0,24.1],[88.3,24.1]]] } }
+  ]
+};
+
+function riskColor(level) {
+  return level === 'High' ? '#dc2626' : level === 'Medium' ? '#f97316' : '#16a34a';
+}
+
+function loadDistrictChoropleth() {
+  districtChoroplethLayer.clearLayers();
+  L.geoJSON(DISTRICT_RISK_GEOJSON, {
+    style: feature => ({
+      color: riskColor(feature.properties.risk),
+      weight: 2,
+      fillColor: riskColor(feature.properties.risk),
+      fillOpacity: 0.16,
+      dashArray: '5 5'
+    }),
+    onEachFeature: (feature, layer) => {
+      layer.bindPopup(`<strong>${feature.properties.name}</strong><br/><em>${feature.properties.risk} risk</em>`);
+    }
+  }).addTo(districtChoroplethLayer);
+}
+
+function addRiskLegend() {
+  const legend = L.control({ position:'bottomright' });
+  legend.onAdd = function() {
+    const container = L.DomUtil.create('div', 'info legend');
+    container.style.background = 'rgba(255,255,255,0.92)';
+    container.style.padding = '8px 10px';
+    container.style.borderRadius = '8px';
+    container.style.boxShadow = '0 6px 18px rgba(15,23,42,0.12)';
+    container.innerHTML = '<strong style="display:block;margin-bottom:6px;font-size:0.85rem;color:#102a43;">District Risk</strong>' +
+      ['High', 'Medium', 'Low'].map(level =>
+        `<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;"><span style="width:12px;height:12px;border-radius:2px;background:${riskColor(level)}"></span>${level}</div>`
+      ).join('');
+    return container;
+  };
+  legend.addTo(map);
+}
+
 // ── State ─────────────────────────────────────────────────────
 let events = [];
 let filter = 'ALL';
@@ -737,8 +801,12 @@ let gdacsLayer = L.layerGroup();
 let sheltersLayer = L.layerGroup();
 let routeLayer = L.layerGroup();
 let hazardZonesLayer = L.layerGroup();
+let districtChoroplethLayer = L.layerGroup();
 let sheltersData = [];
 let activeRoute = null;
+let userLocationMarker = null;
+let routeStartPending = false;
+let timeWindowDays = 7;
 
 // ── Firebase init ─────────────────────────────────────────────
 let db;
@@ -764,14 +832,36 @@ baseLayers["Street"].addTo(map);
 L.control.layers(baseLayers, {}, { position:'topright' }).addTo(map);
 L.control.scale({ imperial:false }).addTo(map);
 
+// Add locate control
+const locateControl = L.control({ position:'topleft' });
+locateControl.onAdd = function() {
+  const el = L.DomUtil.create('button', 'admin-btn');
+  el.style.margin = '8px'; el.style.padding = '6px 10px'; el.textContent = '📍 Locate';
+  el.onclick = () => {
+    map.locate({ setView: true, maxZoom: 13 });
+  };
+  return el;
+};
+locateControl.addTo(map);
+
+map.on('locationfound', e => {
+  if (userLocationMarker) userLocationMarker.remove();
+  userLocationMarker = L.circleMarker(e.latlng, { radius:8, color:'#16a34a', fillColor:'#16a34a', fillOpacity:0.9 }).addTo(map).bindPopup('You are here');
+});
+map.on('locationerror', () => { alert('Geolocation unavailable or permission denied.'); });
+
 // Add layer group controls
 const overlays = {
   "🚨 Incidents": markers,
   "🏠 Shelters": sheltersLayer,
-  "🛣️ Emergency Routes": routeLayer,
+  "🌈 District Risk": districtChoroplethLayer,
   "⚠️ Hazard Zones": hazardZonesLayer
 };
 L.control.layers({}, overlays, { position:'topleft', collapsed:false }).addTo(map);
+districtChoroplethLayer.addTo(map);
+// Initialize choropleth and legend
+loadDistrictChoropleth();
+addRiskLegend();
 
 map.on('mousemove', e => {
   document.getElementById('coords').textContent =
@@ -851,6 +941,7 @@ function createShelterMarker() {
 // ── Load and display shelters ────────────────────────────────
 function loadShelters() {
   sheltersLayer.clearLayers();
+  sheltersData = [];
   const shelterIcon = createShelterMarker();
   
   SHELTERS_GEOJSON.features.forEach(feature => {
@@ -868,6 +959,9 @@ function loadShelters() {
             <tr><td><strong>👥 Capacity:</strong></td><td>${props.capacity.toLocaleString()} persons</td></tr>
             <tr><td><strong>📞 Phone:</strong></td><td><a href="tel:${props.phone}">${props.phone}</a></td></tr>
           </table>
+          <div style="margin-top:8px;display:flex;gap:8px">
+            <button onclick="startRouteTo(${latlng[0]}, ${latlng[1]})" style="flex:1;padding:6px;background:#00d4ff;border:none;color:#081424;border-radius:4px;cursor:pointer">🛣 Route Here</button>
+          </div>
         </div>
       `);
     
@@ -906,6 +1000,74 @@ function findNearestShelter(incidentLat, incidentLng) {
   });
   
   return nearest;
+}
+
+// ── Geocoding (Nominatim) ──────────────────────────────────
+async function geocode(q) {
+  if (!q || q.length < 3) return null;
+  try {
+    const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&addressdetails=1`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+    if (!res.ok) return null;
+    const data = await res.json();
+    if (!data || data.length === 0) return null;
+    return data[0];
+  } catch (e) { return null; }
+}
+
+// ── OSRM routing ───────────────────────────────────────────
+async function fetchOSRMRoute(start, end) {
+  // start/end: [lat, lng]
+  const s = `${start[1]},${start[0]}`;
+  const e = `${end[1]},${end[0]}`;
+  const url = `https://router.project-osrm.org/route/v1/driving/${s};${e}?overview=full&geometries=geojson&steps=false`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error('OSRM failed');
+    const j = await r.json();
+    if (j && j.routes && j.routes.length) return j.routes[0];
+  } catch (err) {
+    console.warn('OSRM route failed:', err.message);
+  }
+  return null;
+}
+
+async function routeBetween(start, end, info={}) {
+  routeLayer.clearLayers();
+  const route = await fetchOSRMRoute(start, end);
+  if (route && route.geometry) {
+    const coords = route.geometry.coordinates.map(c => [c[1], c[0]]);
+    const rr = L.polyline(coords, { color:'#ff8c00', weight:4, opacity:0.9 });
+    rr.addTo(routeLayer);
+    routeLayer.addTo(map);
+    map.fitBounds(rr.getBounds(), { padding:[60,60] });
+  } else {
+    // fallback to straight line
+    drawEmergencyRoute(start[0], start[1], end[0], end[1], info.from||'Start', info.to||'Destination');
+  }
+}
+
+// ── Interactive routing helpers ───────────────────────────
+function startRouteTo(lat, lng) {
+  // If we have user location, route immediately, otherwise ask user to click map for start
+  const dest = [lat, lng];
+  if (userLocationMarker) {
+    const start = [userLocationMarker.getLatLng().lat, userLocationMarker.getLatLng().lng];
+    routeBetween(start, dest, { from:'Your Location', to:'Shelter' });
+  } else {
+    routeStartPending = dest;
+    alert('Click any point on the map to set the START point for routing to the selected shelter.');
+  }
+}
+
+function handleRouteClick(latlng) {
+  if (routeStartPending) {
+    const start = [latlng.lat, latlng.lng];
+    const dest = routeStartPending;
+    routeStartPending = false;
+    routeBetween(start, dest, { from:`Point ${start[0].toFixed(3)},${start[1].toFixed(3)}`, to:'Shelter' });
+    return;
+  }
 }
 
 // ── Draw emergency route (simple line to nearest shelter) ────
@@ -979,6 +1141,38 @@ function loadHazardZones() {
   });
   
   hazardZonesLayer.addTo(map);
+}
+
+// ── Render hazard list with time filtering ───────────────────
+function renderHazardList() {
+  const container = document.getElementById('hazard-news');
+  container.innerHTML = '';
+  const now = Date.now();
+  const days = parseInt(timeWindowDays,10) || 7;
+  const cutoff = now - (days * 24 * 3600 * 1000);
+  const filtered = (events || []).filter(ev => {
+    const d = new Date(ev.date).getTime();
+    return !isNaN(d) ? d >= cutoff : true;
+  });
+  if (!filtered.length) {
+    container.innerHTML = '<div class="no-history">No hazard zones detected in this time window.</div>';
+    return;
+  }
+  filtered.forEach(ev => {
+    const card = document.createElement('div');
+    card.className = 'hz-card';
+    card.innerHTML = `<div class="e-row1"><div class="e-name">${ev.name}</div><div class="badge ${ev.alert}">${ev.alert}</div></div><div style="font-size:0.82rem;color:var(--text-muted);margin-top:6px">${ev.date} · ${ev.country}</div>`;
+    card.addEventListener('click', () => {
+      map.flyTo([ev.lat, ev.lng], 7, { duration: 1.2 });
+    });
+    container.appendChild(card);
+  });
+}
+
+function updateTimeWindow(v) {
+  timeWindowDays = v;
+  document.getElementById('time-window-label').textContent = v;
+  renderHazardList();
 }
 
 // ── Load GDACS ────────────────────────────────────────────────
@@ -1169,6 +1363,20 @@ function renderGDACSLayer() {
 }
 
 function render() {
+  // Initialize map layers and sidebar content
+  loadShelters();
+  loadHazardZones();
+  loadDistrictChoropleth();
+  addRiskLegend();
+  // populate GDACS / hazard markers
+  gdacsLayer.clearLayers();
+  (events || []).forEach(ev => {
+    const m = L.marker([ev.lat, ev.lng], { icon: createIncidentMarker(ev.type, ev.alert) })
+      .bindPopup(`<div style="min-width:220px"><div style="font-weight:700">${ev.name}</div><div style="font-size:0.85rem;color:#64748b;margin-top:6px">${ev.date} · ${ev.country}</div><div style="margin-top:8px"><button onclick="(function(){ const nearest=findNearestShelter(${ev.lat}, ${ev.lng}); if(nearest){ startRouteTo(nearest.latlng[0], nearest.latlng[1]); } else { alert('No shelters available'); } })()" style="padding:6px;background:#00d4ff;border:none;color:#081424;border-radius:4px;cursor:pointer">🛣 Route to nearest shelter</button></div></div>`);
+    m.addTo(gdacsLayer);
+  });
+  if (!map.hasLayer(gdacsLayer)) gdacsLayer.addTo(map);
+  renderHazardList();
   // Initialize with nearby shelters display
   renderNearbyShelters('');
 }
@@ -1179,8 +1387,21 @@ function setFilter(t) {
 
 // ── Search for shelters by location ───────────────────────
 function searchSheltersByLocation() {
-  const q = document.getElementById('search').value.toLowerCase().trim();
+  const qraw = document.getElementById('search').value.trim();
+  const q = qraw.toLowerCase().trim();
   renderNearbyShelters(q);
+  // If no local shelter matches, try geocoding the query (real geocoding)
+  if (q && document.getElementById('cnt-shelters').textContent === '0') {
+    geocode(qraw).then(r => {
+      if (r) {
+        const lat = parseFloat(r.lat), lon = parseFloat(r.lon);
+        map.flyTo([lat, lon], 12, { duration: 1.2 });
+        // add temporary marker
+        const tmp = L.circleMarker([lat, lon], { radius:6, color:'#00d4ff', fillOpacity:0.9 }).addTo(map);
+        setTimeout(() => tmp.remove(), 7000);
+      }
+    });
+  }
 }
 
 function showAllShelters() {
@@ -1249,6 +1470,24 @@ function renderNearbyShelters(query) {
     });
     
     list.appendChild(c);
+  });
+
+  // Update marker visibility based on current shelter filter
+  applyShelterFilter(filter || 'ALL');
+}
+
+function applyShelterFilter(type) {
+  filter = type || 'ALL';
+  // update button states
+  document.querySelectorAll('.f-btn').forEach(b => {
+    b.classList.toggle('on', b.getAttribute('data-type') === type);
+  });
+  sheltersLayer.clearLayers();
+  sheltersData.forEach(s => {
+    const t = s.feature.properties.type || 'Other';
+    if (type === 'ALL' || t === type) {
+      sheltersLayer.addLayer(s.marker);
+    }
   });
 }
 
